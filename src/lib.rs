@@ -3,7 +3,8 @@ pub mod claude {
     use serde::{Deserialize, Serialize};
     use std::env;
 
-    const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
+    const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1";
+    const DEFAULT_MODEL: &str = "claude-3-7-sonnet-20250219";
 
     #[derive(Debug, Serialize)]
     pub struct Message {
@@ -16,16 +17,39 @@ pub mod claude {
         pub model: String,
         pub messages: Vec<Message>,
         pub max_tokens: u32,
+        pub system: Option<String>,
     }
 
     #[derive(Debug, Deserialize)]
     pub struct ClaudeResponse {
         pub content: Vec<Content>,
+        pub role: String,
+        pub model: String,
+        pub id: String,
     }
 
     #[derive(Debug, Deserialize)]
     pub struct Content {
         pub text: String,
+        #[serde(rename = "type")]
+        pub content_type: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct Model {
+        #[serde(rename = "type")]
+        pub model_type: String,
+        pub id: String,
+        pub display_name: String,
+        pub created_at: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct ListModelsResponse {
+        pub data: Vec<Model>,
+        pub has_more: bool,
+        pub first_id: String,
+        pub last_id: String,
     }
 
     pub struct ClaudeClient {
@@ -46,13 +70,19 @@ pub mod claude {
 
         pub async fn send_message(
             &self,
-            model: &str,
+            model: Option<&str>,
             system_prompt: &str,
             user_message: &str,
         ) -> Result<String, Box<dyn std::error::Error>> {
+            let model = model.unwrap_or(DEFAULT_MODEL);
             let mut headers = HeaderMap::new();
             headers.insert(
                 "x-api-key",
+                HeaderValue::from_str(&self.api_key)
+                    .map_err(|e| format!("Invalid API key format: {}", e))?,
+            );
+            headers.insert(
+                "anthropic-api-key",
                 HeaderValue::from_str(&self.api_key)
                     .map_err(|e| format!("Invalid API key format: {}", e))?,
             );
@@ -70,28 +100,63 @@ pub mod claude {
                 model: model.to_string(),
                 messages: vec![
                     Message {
-                        role: "system".to_string(),
-                        content: system_prompt.to_string(),
-                    },
-                    Message {
                         role: "user".to_string(),
                         content: user_message.to_string(),
                     },
                 ],
                 max_tokens: 4000,
+                system: Some(system_prompt.to_string()),
             };
 
-            let response = self
+            let raw_response = self
                 .client
-                .post(ANTHROPIC_API_URL)
+                .post(format!("{}/messages", ANTHROPIC_API_URL))
                 .headers(headers)
                 .json(&request)
                 .send()
                 .await?
-                .json::<ClaudeResponse>()
+                .text()
                 .await?;
+            println!("Raw response: {}", raw_response);
+            let response: ClaudeResponse = serde_json::from_str(&raw_response)?;
 
-            Ok(response.content[0].text.clone())
+            Ok(response.content.into_iter()
+                .filter(|c| c.content_type == "text")
+                .map(|c| c.text)
+                .collect::<Vec<_>>()
+                .join(""))
+        }
+
+        pub async fn list_models(&self) -> Result<Vec<Model>, Box<dyn std::error::Error>> {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-api-key",
+                HeaderValue::from_str(&self.api_key)
+                    .map_err(|e| format!("Invalid API key format: {}", e))?,
+            );
+            headers.insert(
+                "anthropic-api-key",
+                HeaderValue::from_str(&self.api_key)
+                    .map_err(|e| format!("Invalid API key format: {}", e))?,
+            );
+            headers.insert(
+                "anthropic-version",
+                HeaderValue::from_static("2023-06-01"),
+            );
+            headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+
+            let raw_response = self
+                .client
+                .get(format!("{}/models", ANTHROPIC_API_URL))
+                .headers(headers)
+                .send()
+                .await?
+                .text()
+                .await?;
+            println!("Raw response: {}", raw_response);
+            let response: ListModelsResponse = serde_json::from_str(&raw_response)?;
+
+            Ok(response.data)
         }
     }
 }
